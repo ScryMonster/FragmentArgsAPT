@@ -14,7 +14,7 @@ import javax.lang.model.util.Elements
 import javax.lang.model.util.Types
 import javax.tools.Diagnostic
 import com.squareup.kotlinpoet.ClassName
-import javax.lang.model.type.TypeMirror
+import kotlin.reflect.KClass
 
 
 @AutoService(Processor::class)
@@ -27,8 +27,6 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
     private val classBundle = ClassName("android.os", "Bundle")
     private val classParcelable = ClassName("android.os", "Parcelable")
     private val classString = ClassName("kotlin", "String")
-    private val parcelableType: TypeMirror?
-        get() = elems?.getTypeElement("android.os.Parcelable")?.asType()
 
 
     private var filer: Filer? = null
@@ -66,7 +64,7 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
                 if (argumentedFragment.kind == ElementKind.CLASS) {
                     val fType = elems?.getTypeElement("androidx.fragment.app.Fragment")?.asType()
                     val mType =
-                        types?.directSupertypes(argumentedFragment.asType())?.find { it == fType }
+                        types?.directSupertypes(argumentedFragment.asType())?.firstOrNull { it == fType }
                             ?: argumentedFragment.asType()
 
 
@@ -81,13 +79,21 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
                     )
                     if (types?.isSameType(mType, fType) == true) {
 
-                        val arguments = argumentedFragment?.enclosedElements?.filter { it?.getAnnotation(FragmentParam::class.java) != null } ?: arrayListOf()
+                        val arguments = argumentedFragment?.enclosedElements?.filter {
+                            it?.getAnnotation(FragmentParam::class.java) != null
+                        } ?: arrayListOf()
+                        if (arguments.isEmpty()) {
+                            messager?.printMessage(
+                                Diagnostic.Kind.WARNING,
+                                "It is useless to use '@ArgumentedFragment' without marking it's fields with '@FragmentParam'"
+                            )
+                        }
                         processAnnotation(argumentedFragment, arguments)
                     }
                 } else {
                     messager?.printMessage(
                         Diagnostic.Kind.ERROR,
-                        "For correct work of the @Builder,please mark only classes with it."
+                        "For correct work of the @ArgumentedFragment,please mark only classes with it."
                     )
                     return true
                 }
@@ -96,48 +102,89 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
         return false
     }
 
-    private fun processAnnotation(fragmentClass: Element, fileds: List<Element>) {
+    private fun processAnnotation(fragmentClass: Element, fields: List<Element>) {
         val className = fragmentClass.simpleName.toString()
-        val packageName = processingEnv.elementUtils.getPackageOf(fragmentClass).toString()
+        val packageName = elems?.getPackageOf(fragmentClass).toString()
         val fileName = "${className}Args"
 
 
         val fileBuilder = FileSpec.builder(packageName, fileName)
         val classBuilder = TypeSpec.objectBuilder(fileName)
 
-        fileds.forEach { argument ->
+//        fields.forEach { argument ->
+//
+//            val initializer = "${argument.simpleName}_KEY"
+//            fileBuilder.addProperty(
+//                PropertySpec.builder(
+//                    "${argument.simpleName}Key",
+//                    classString
+//                )
+//                    .initializer("%S", "$initializer")
+//                    .build()
+//            )
+//        }
+
+        fields.forEach { argument ->
 
             val initializer = "${argument.simpleName}_KEY"
-            classBuilder.addProperty(
-                PropertySpec.varBuilder(
+            fileBuilder.addProperty(
+                PropertySpec.builder(
                     "${argument.simpleName}Key",
-                    classString
+                    classString,
+                    KModifier.PRIVATE
                 )
                     .initializer("%S", "$initializer")
                     .build()
             )
+
+            val (getFromBundle,asType,type) = when {
+                argument isSameJavaTypeAs "java.lang.String" -> Triple("getString","as? kotlin.String",ClassName("kotlin","String").asNullable())
+                argument isSameJavaTypeAs "java.lang.Integer" -> Triple("getInt","as? kotlin.Int",ClassName("kotlin","Int").asNullable())
+                argument isSameJavaTypeAs "java.lang.Double" -> Triple("getDouble","as? kotlin.Double",ClassName("kotlin","Double").asNullable())
+                argument isSameJavaTypeAs "java.lang.Float" ->  Triple("getFloat","as? kotlin.Float",ClassName("kotlin","Float").asNullable())
+                argument isSameJavaTypeAs "java.lang.Long" ->  Triple("getLong","as? kotlin.Long",ClassName("kotlin","Long").asNullable())
+                argument isSameJavaTypeAs "java.lang.Short" ->  Triple("getShort","as? kotlin.Short",ClassName("kotlin","Short").asNullable())
+                argument isSameJavaTypeAs "java.lang.Byte" ->  Triple("getByte","as? kotlin.Byte",ClassName("kotlin","Byte").asNullable())
+                argument isSameJavaTypeAs "java.lang.Character" ->  Triple("getChar","as? kotlin.Char",ClassName("kotlin","Char").asNullable())
+                else -> Triple("getParcelable","as? ${argument.asType().asTypeName()}",classParcelable)
+            }
+
+
+            fileBuilder.addProperty(
+                PropertySpec.builder(
+                    "generated${argument.let { it.toString().replaceFirst(it.toString().first(),it.toString().first().toUpperCase()) }}",
+                    type.asNullable()
+                )
+                    .receiver(fragmentClass.asType().asTypeName())
+                    .getter(
+                        FunSpec.getterBuilder()
+                            .addCode("return arguments?.$getFromBundle(${argument.simpleName}Key) $asType").build()
+                    )
+                    .build()
+            )
         }
+
+
 
         val funF = FunSpec.builder("get$className")
             .returns(fragmentClass.asType().asTypeName())
-
-            .addParameters(fileds.map {
+            .addParameters(fields.map {
                 when {
 
-                    it isSameJavaTypeAs "java.lang.String" -> it.paramName buildParamWithType "java.lang.String"
-                    it isSameJavaTypeAs "java.lang.Integer" -> it.paramName buildParamWithType "java.lang.Integer"
-                    it isSameJavaTypeAs "java.lang.Double" -> it.paramName buildParamWithType "java.lang.Double"
-                    it isSameJavaTypeAs "java.lang.Float" -> it.paramName buildParamWithType "java.lang.Float"
-                    it isSameJavaTypeAs "java.lang.Long" -> it.paramName buildParamWithType "java.lang.Long"
-                    it isSameJavaTypeAs "java.lang.Character" -> it.paramName buildParamWithType "java.lang.Character"
-                    it isSameJavaTypeAs "java.lang.Byte" -> it.paramName buildParamWithType "java.lang.Byte"
-                    else -> it.paramName buildParamWithType "android.os.Parcelable"
+                    it isSameJavaTypeAs "java.lang.String" -> buildParamWithType(it.paramName ,String::class)
+                    it isSameJavaTypeAs "java.lang.Integer" -> buildParamWithType(it.paramName ,Int::class)
+                    it isSameJavaTypeAs "java.lang.Double" -> buildParamWithType(it.paramName ,Double::class)
+                    it isSameJavaTypeAs "java.lang.Float" -> buildParamWithType(it.paramName ,Float::class)
+                    it isSameJavaTypeAs "java.lang.Long" -> buildParamWithType(it.paramName ,Long::class)
+                    it isSameJavaTypeAs "java.lang.Character" -> buildParamWithType(it.paramName ,Char::class)
+                    it isSameJavaTypeAs "java.lang.Byte" -> buildParamWithType(it.paramName ,Byte::class)
+                    else -> buildParcelableParam(it.paramName, it.asType().asTypeName().toString())
                 }
             })
 
             .addCode("return ${className}()")
 
-        if (fileds.isNotEmpty()) {
+        if (fields.isNotEmpty()) {
             funF.addCode(
                 """
             .also{
@@ -146,8 +193,8 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
         """.trimIndent(), classBundle
             )
         }
-        messager?.printMessage(Diagnostic.Kind.WARNING, "Fields count: ${fileds.count()} ")
-        fileds.forEach { argument ->
+        messager?.printMessage(Diagnostic.Kind.WARNING, "Fields count: ${fields.count()} ")
+        fields.forEach { argument ->
             if(argument isSameJavaTypeAs "java.lang.String") funF.putElementInBundleAs("putString",argument)
             else if(argument isSameJavaTypeAs "java.lang.Integer") funF.putElementInBundleAs("putInt",argument)
             else if(argument isSameJavaTypeAs "java.lang.Double") funF.putElementInBundleAs("putDouble",argument)
@@ -160,7 +207,7 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
 
         }
 
-        if(fileds.isNotEmpty()) {
+        if (fields.isNotEmpty()) {
             funF.addCode(
                 """
                     }
@@ -169,6 +216,8 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
             )
         }
         classBuilder.addFunction(funF.build())
+
+
 
         val file = fileBuilder.addType(classBuilder.build()).build()
         val kaptKotlinGeneratedDir = processingEnv.options[KAPT_KOTLIN_GENERATED_OPTION_NAME]
@@ -183,35 +232,38 @@ class FragmentParamsAnnotationProcessor : AbstractProcessor() {
     ) == true
 
 
-    private infix fun String.buildParamWithType(type: String): ParameterSpec {
+    private fun buildParamWithType(name:String,type: KClass<*>): ParameterSpec {
         messager?.printMessage(Diagnostic.Kind.WARNING, "Field inside type: $javaClass ")
-        val type = when (type) {
+        return ParameterSpec.builder(name, type).build()
+    }
 
-            "java.lang.String" -> String::class
-            "java.lang.Integer" -> Int::class
-            "java.lang.Double" -> Double::class
-            "java.lang.Float" -> Float::class
-            "java.lang.Long" -> Long::class
-            "java.lang.Short" -> Short::class
-            "java.lang.Character" -> Char::class
-            "java.lang.Byte" -> Byte::class
-            else -> null
-        }
+    private fun buildParcelableParam(name: String, type: String): ParameterSpec {
+        messager?.printMessage(Diagnostic.Kind.WARNING, "Field inside type ss: $javaClass ")
+        val className = getSpecificClassName(type)
+        return ParameterSpec.builder(name, className).build()
+    }
 
-        return type?.let { ParameterSpec.builder(this, it).build() }
-            ?: ParameterSpec.builder(this, classParcelable).build()
+    private fun getSpecificClassName(type: String): ClassName {
+        val indexOfLastDot = type.lastIndexOf('.')
+        val packageName = type.substring(0, indexOfLastDot)
+        messager?.printMessage(Diagnostic.Kind.WARNING, "Package name: $packageName ")
+
+        val typeName = type.substring(indexOfLastDot + 1, type.length)
+        messager?.printMessage(Diagnostic.Kind.WARNING, "Type name: $typeName ")
+
+        return ClassName(packageName, typeName)
     }
 
     private val Element.paramName: String
         get() = "${simpleName}Parameter"
 
-    private fun FunSpec.Builder.putElementInBundleAs(type:String,argument:Element){
+    private fun FunSpec.Builder.putElementInBundleAs(putType: String, argument: Element) {
         addCode(
             """
-                $type(${argument}Key,${argument}Parameter)
+                $putType(${argument}Key,${argument}Parameter) 
                 
             """.trimIndent()
-        )
+        )  //e.g. putInt(cardNumberKey,cardNumberParameter)
     }
 
 }
